@@ -27,7 +27,7 @@ def notify_change_status():
         return
 
     # ----------------------------------------------------------------------------------------
-    # Get project details (ID, status field, and QA Testing option)
+    # Get the project_id, status_field_id, and QA Testing option ID
     # ----------------------------------------------------------------------------------------
 
     project_title = config.project_title
@@ -39,23 +39,25 @@ def notify_change_status():
 
     if not project_id:
         logging.error(f"Project {project_title} not found.")
-        return
+        return None
 
     status_field_id = graphql.get_status_field_id(
         project_id=project_id,
         status_field_name=config.status_field_name
     )
+
     if not status_field_id:
         logging.error(f"Status field not found in project {project_title}")
-        return
+        return None
 
     status_option_id = graphql.get_qatesting_status_option_id(
         project_id=project_id,
         status_field_name=config.status_field_name
     )
+
     if not status_option_id:
         logging.error(f"'QA Testing' option not found in project {project_title}")
-        return
+        return None
 
     # ----------------------------------------------------------------------------------------
     # Iterate over merged PRs and update linked issues
@@ -65,7 +67,7 @@ def notify_change_status():
         pr_number = pr["number"]
         pr_url = pr["url"]
         pr_title = pr["title"]
-        linked_issues = pr.get("closingIssuesReferences", {}).get("nodes", [])
+        linked_issues = pr.get("referencedIssues", {}).get("nodes", [])
 
         if not linked_issues:
             logger.info(f"PR #{pr_number} ({pr_title}) has no linked issues.")
