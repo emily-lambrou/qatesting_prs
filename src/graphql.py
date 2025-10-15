@@ -1,317 +1,116 @@
-from pprint import pprint
+from logger import logger
 import logging
-import requests
 import config
-
-logging.basicConfig(level=logging.DEBUG)
-
-
-def get_recent_merged_prs_in_dev(owner, repo, since_timestamp=None):
-    """
-    Fetch all merged PRs in the 'dev' branch (optionally after a given date).
-    """
-    query = """
-    query GetMergedPRs($owner: String!, $repo: String!, $afterCursor: String) {
-      repository(owner: $owner, name: $repo) {
-        pullRequests(
-          first: 100
-          after: $afterCursor
-          baseRefName: "dev"
-          states: MERGED
-          orderBy: {field: UPDATED_AT, direction: DESC}
-        ) {
-          nodes {
-            id
-            number
-            title
-            mergedAt
-            url
-            bodyText
-          }
-          pageInfo {
-            endCursor
-            hasNextPage
-          }
-        }
-      }
-    }
-    """
-    variables = {"owner": owner, "repo": repo, "afterCursor": None}
-    prs = []
-    try:
-        while True:
-            response = requests.post(
-                config.api_endpoint,
-                json={"query": query, "variables": variables},
-                headers={"Authorization": f"Bearer {config.gh_token}"},
-            )
-            data = response.json()
-            if "errors" in data:
-                logging.error(f"GraphQL query errors: {data['errors']}")
-                break
-
-            nodes = data.get("data", {}).get("repository", {}).get("pullRequests", {}).get("nodes", [])
-            for pr in nodes:
-                if since_timestamp and pr["mergedAt"] < since_timestamp:
-                    continue
-                prs.append(pr)
-
-            page_info = data.get("data", {}).get("repository", {}).get("pullRequests", {}).get("pageInfo", {})
-            if not page_info.get("hasNextPage"):
-                break
-            variables["afterCursor"] = page_info.get("endCursor")
-        return prs
-    except requests.RequestException as e:
-        logging.error(f"Request error: {e}")
-        return []
+import graphql
 
 
-def get_issues_from_pr_description(pr_id):
-    """
-    Finds issues mentioned in the PR description using CrossReferencedEvent in PR timeline.
-    Works when issue numbers are mentioned in PR body (e.g., "Fixes #123" or "Related to #456").
-    """
-    query = """
-    query($prId: ID!, $after: String) {
-      node(id: $prId) {
-        ... on PullRequest {
-          timelineItems(first: 100, after: $after) {
-            nodes {
-              __typename
-              ... on CrossReferencedEvent {
-                target {
-                  __typename
-                  ... on Issue {
-                    id
-                    number
-                    title
-                    url
-                  }
-                }
-              }
-            }
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-          }
-        }
-      }
-    }
-    """
-
-    issues = []
-    variables = {"prId": pr_id, "after": None}
-
-    try:
-        while True:
-            response = requests.post(
-                config.api_endpoint,
-                json={"query": query, "variables": variables},
-                headers={"Authorization": f"Bearer {config.gh_token}"},
-            )
-            data = response.json()
-            if "errors" in data:
-                logging.error(f"GraphQL query errors: {data['errors']}")
-                break
-
-            nodes = data.get("data", {}).get("node", {}).get("timelineItems", {}).get("nodes", [])
-            for node in nodes:
-                if node.get("__typename") == "CrossReferencedEvent":
-                    target = node.get("target")
-                    if target and target.get("__typename") == "Issue":
-                        issues.append(target)
-
-            page_info = data.get("data", {}).get("node", {}).get("timelineItems", {}).get("pageInfo", {})
-            if not page_info.get("hasNextPage"):
-                break
-            variables["after"] = page_info.get("endCursor")
-
-        return issues
-    except requests.RequestException as e:
-        logging.error(f"Request error: {e}")
-        return []
+def check_comment_exists(issue_id, comment_text):
+    """Check if the comment already exists on the issue."""
+    comments = graphql.get_issue_comments(issue_id)
+    for comment in comments:
+        if comment_text in comment.get("body", ""):
+            return True
+    return False
 
 
-def get_project_id_by_title(owner, project_title):
-    query = """
-    query($owner: String!, $projectTitle: String!) {
-      organization(login: $owner) {
-        projectsV2(first: 10, query: $projectTitle) {
-          nodes {
-            id
-            title
-          }
-        }
-      }
-    }
-    """
-    variables = {"owner": owner, "projectTitle": project_title}
-    try:
-        response = requests.post(
-            config.api_endpoint,
-            json={"query": query, "variables": variables},
-            headers={"Authorization": f"Bearer {config.gh_token}"},
-        )
-        data = response.json()
-        projects = data.get("data", {}).get("organization", {}).get("projectsV2", {}).get("nodes", [])
-        for project in projects:
-            if project.get("title") == project_title:
-                return project.get("id")
-        return None
-    except requests.RequestException as e:
-        logging.error(f"Request error: {e}")
+def notify_change_status():
+    logger.info("Fetching merged PRs into dev...")
+
+    merged_prs = graphql.get_recent_merged_prs_in_dev(
+        owner=config.repository_owner,
+        repo=config.repository_name
+    )
+
+    if not merged_prs:
+        logger.info("No merged PRs found in dev.")
+        return
+
+    # ----------------------------------------------------------------------------------------
+    # Get project and status metadata
+    # ----------------------------------------------------------------------------------------
+    project_title = config.project_title
+
+    project_id = graphql.get_project_id_by_title(
+        owner=config.repository_owner,
+        project_title=project_title
+    )
+    if not project_id:
+        logging.error(f"Project {project_title} not found.")
         return None
 
-
-def get_status_field_id(project_id, status_field_name):
-    query = """
-    query($projectId: ID!) {
-      node(id: $projectId) {
-        ... on ProjectV2 {
-          fields(first: 100) {
-            nodes {
-              __typename
-              ... on ProjectV2SingleSelectField {
-                id
-                name
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    variables = {"projectId": project_id}
-    try:
-        response = requests.post(
-            config.api_endpoint,
-            json={"query": query, "variables": variables},
-            headers={"Authorization": f"Bearer {config.gh_token}"},
-        )
-        data = response.json()
-        fields = data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
-        for field in fields:
-            if field.get("name") == status_field_name:
-                return field.get("id")
-        return None
-    except requests.RequestException as e:
-        logging.error(f"Request error: {e}")
+    status_field_id = graphql.get_status_field_id(project_id, config.status_field_name)
+    if not status_field_id:
+        logging.error(f"Status field not found in project {project_title}")
         return None
 
-
-def get_qatesting_status_option_id(project_id, status_field_name):
-    query = """
-    query($projectId: ID!) {
-      node(id: $projectId) {
-        ... on ProjectV2 {
-          fields(first: 100) {
-            nodes {
-              ... on ProjectV2SingleSelectField {
-                id
-                name
-                options {
-                  id
-                  name
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    variables = {"projectId": project_id}
-    try:
-        response = requests.post(
-            config.api_endpoint,
-            json={"query": query, "variables": variables},
-            headers={"Authorization": f"Bearer {config.gh_token}"},
-        )
-        data = response.json()
-        fields = data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
-        for field in fields:
-            if field.get("name") == status_field_name:
-                for option in field.get("options", []):
-                    if option.get("name") == "QA Testing":
-                        return option.get("id")
-        return None
-    except requests.RequestException as e:
-        logging.error(f"Request error: {e}")
+    status_option_id = graphql.get_qatesting_status_option_id(project_id, config.status_field_name)
+    if not status_option_id:
+        logging.error(f"'QA Testing' option not found in project {project_title}")
         return None
 
+    # ----------------------------------------------------------------------------------------
+    # Iterate over merged PRs and update linked issues
+    # ----------------------------------------------------------------------------------------
+    for pr in merged_prs:
+        pr_id = pr["id"]
+        pr_number = pr["number"]
+        pr_title = pr["title"]
+        pr_url = pr["url"]
 
-def get_issue_status(issue_id, status_field_name):
-    query = """
-    query($issueId: ID!, $statusField: String!) {
-      node(id: $issueId) {
-        ... on Issue {
-          projectItems(first: 10) {
-            nodes {
-              fieldValueByName(name: $statusField) {
-                ... on ProjectV2ItemFieldSingleSelectValue {
-                  name
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    variables = {"issueId": issue_id, "statusField": status_field_name}
-    try:
-        response = requests.post(
-            config.api_endpoint,
-            json={"query": query, "variables": variables},
-            headers={"Authorization": f"Bearer {config.gh_token}"},
-        )
-        data = response.json()
-        nodes = data.get("data", {}).get("node", {}).get("projectItems", {}).get("nodes", [])
-        for item in nodes:
-            field = item.get("fieldValueByName")
-            if field:
-                return field.get("name")
-        return None
-    except requests.RequestException as e:
-        logging.error(f"Request error: {e}")
-        return None
+        logger.info(f"Checking PR #{pr_number} ({pr_title}) for mentioned issues in description...")
 
+        linked_issues = graphql.get_issues_from_pr_description(pr_id)
 
-def get_project_item_id_for_issue(project_id, issue_id):
-    query = """
-    query($projectId: ID!, $issueId: ID!) {
-      node(id: $issueId) {
-        ... on Issue {
-          projectItems(first: 10) {
-            nodes {
-              id
-              project {
-                id
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    variables = {"projectId": project_id, "issueId": issue_id}
-    try:
-        response = requests.post(
-            config.api_endpoint,
-            json={"query": query, "variables": variables},
-            headers={"Authorization": f"Bearer {config.gh_token}"},
-        )
-        data = response.json()
-        items = data.get("data", {}).get("node", {}).get("projectItems", {}).get("nodes", [])
-        for item in items:
-            project = item.get("project", {})
-            if project and project.get("id") == project_id:
-                return item.get("id")
-        return None
-    except requests.RequestException as e:
-        logging.error(f"Request error: {e}")
-        return None
+        if not linked_issues:
+            logger.info(f"PR #{pr_number} has no mentioned issues in description.")
+            continue
+
+        logger.info(f"Processing PR #{pr_number} with {len(linked_issues)} linked issue(s).")
+
+        for issue in linked_issues:
+            issue_id = issue["id"]
+            issue_number = issue["number"]
+
+            comment_text = f"Testing will be available in 15 minutes (triggered by [PR #{pr_number}]({pr_url}))"
+
+            if check_comment_exists(issue_id, comment_text):
+                logger.info(f"Skipping issue #{issue_number} — comment already exists.")
+                continue
+
+            current_status = graphql.get_issue_status(issue_id, config.status_field_name)
+            item_id = graphql.get_project_item_id_for_issue(project_id, issue_id)
+
+            if not item_id:
+                logger.warning(f"Issue #{issue_number} not linked to project {project_title}.")
+                continue
+
+            if current_status != "QA Testing":
+                logger.info(f"Updating issue #{issue_number} to QA Testing.")
+                update_result = graphql.update_issue_status_to_qa_testing(
+                    owner=config.repository_owner,
+                    project_title=project_title,
+                    project_id=project_id,
+                    status_field_id=status_field_id,
+                    item_id=item_id,
+                    status_option_id=status_option_id,
+                )
+
+                if update_result:
+                    logger.info(f"✅ Successfully updated issue #{issue_number} to QA Testing.")
+                    graphql.add_issue_comment(issue_id, comment_text)
+                else:
+                    logger.error(f"❌ Failed to update issue #{issue_number}.")
+            else:
+                logger.info(f"Issue #{issue_number} already in QA Testing — adding comment only.")
+                graphql.add_issue_comment(issue_id, comment_text)
 
 
-def update_issue_status_to_qa_testing(owner, project_title, projec
+def main():
+    logger.info("🔄 Process started...")
+    if config.dry_run:
+        logger.info("DRY RUN MODE ON!")
+    notify_change_status()
+
+
+if __name__ == "__main__":
+    main()
