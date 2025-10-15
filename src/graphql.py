@@ -57,13 +57,23 @@ def get_recent_merged_prs_in_dev(owner, repo, since_timestamp=None):
                 logging.error(f"GraphQL query errors: {data['errors']}")
                 break
 
-            nodes = data.get("data", {}).get("repository", {}).get("pullRequests", {}).get("nodes", [])
+            nodes = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("pullRequests", {})
+                .get("nodes", [])
+            )
             for pr in nodes:
                 if since_timestamp and pr["mergedAt"] < since_timestamp:
                     continue
                 prs.append(pr)
 
-            page_info = data.get("data", {}).get("repository", {}).get("pullRequests", {}).get("pageInfo", {})
+            page_info = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("pullRequests", {})
+                .get("pageInfo", {})
+            )
             if not page_info.get("hasNextPage"):
                 break
             variables["afterCursor"] = page_info.get("endCursor")
@@ -94,7 +104,12 @@ def get_project_id_by_title(owner, project_title):
             headers={"Authorization": f"Bearer {config.gh_token}"},
         )
         data = response.json()
-        projects = data.get("data", {}).get("organization", {}).get("projectsV2", {}).get("nodes", [])
+        projects = (
+            data.get("data", {})
+            .get("organization", {})
+            .get("projectsV2", {})
+            .get("nodes", [])
+        )
         for project in projects:
             if project.get("title") == project_title:
                 return project.get("id")
@@ -134,9 +149,14 @@ def get_status_field_id(project_id, status_field_name):
             headers={"Authorization": f"Bearer {config.gh_token}"},
         )
         data = response.json()
-        fields = data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
+        fields = (
+            data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
+        )
         for field in fields:
-            if field.get("__typename") == "ProjectV2SingleSelectField" and field.get("name") == status_field_name:
+            if (
+                field.get("__typename") == "ProjectV2SingleSelectField"
+                and field.get("name") == status_field_name
+            ):
                 return field.get("id")
         return None
     except requests.RequestException as e:
@@ -178,9 +198,14 @@ def get_qatesting_status_option_id(project_id, status_field_name):
             headers={"Authorization": f"Bearer {config.gh_token}"},
         )
         data = response.json()
-        fields = data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
+        fields = (
+            data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
+        )
         for field in fields:
-            if field.get("__typename") == "ProjectV2SingleSelectField" and field.get("name") == status_field_name:
+            if (
+                field.get("__typename") == "ProjectV2SingleSelectField"
+                and field.get("name") == status_field_name
+            ):
                 for option in field.get("options", []):
                     if option.get("name") == "QA Testing":
                         return option.get("id")
@@ -216,7 +241,9 @@ def get_issue_status(issue_id, status_field_name):
             headers={"Authorization": f"Bearer {config.gh_token}"},
         )
         data = response.json()
-        nodes = data.get("data", {}).get("node", {}).get("projectItems", {}).get("nodes", [])
+        nodes = (
+            data.get("data", {}).get("node", {}).get("projectItems", {}).get("nodes", [])
+        )
         for item in nodes:
             field = item.get("fieldValueByName")
             if field:
@@ -227,7 +254,50 @@ def get_issue_status(issue_id, status_field_name):
         return None
 
 
-def update_issue_status_to_qa_testing(owner, project_title, project_id, status_field_id, item_id, status_option_id):
+def get_project_item_id_for_issue(project_id, issue_id):
+    """
+    Returns the Project Item ID for a given issue ID inside the specified project.
+    """
+    query = """
+    query($projectId: ID!, $issueId: ID!) {
+      node(id: $issueId) {
+        ... on Issue {
+          projectItems(first: 10) {
+            nodes {
+              id
+              project {
+                id
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    variables = {"projectId": project_id, "issueId": issue_id}
+    try:
+        response = requests.post(
+            config.api_endpoint,
+            json={"query": query, "variables": variables},
+            headers={"Authorization": f"Bearer {config.gh_token}"},
+        )
+        data = response.json()
+        items = (
+            data.get("data", {}).get("node", {}).get("projectItems", {}).get("nodes", [])
+        )
+        for item in items:
+            project = item.get("project", {})
+            if project and project.get("id") == project_id:
+                return item.get("id")
+        return None
+    except requests.RequestException as e:
+        logging.error(f"Request error: {e}")
+        return None
+
+
+def update_issue_status_to_qa_testing(
+    owner, project_title, project_id, status_field_id, item_id, status_option_id
+):
     mutation = """
     mutation UpdateIssueStatus($projectId: ID!, $itemId: ID!, $statusFieldId: ID!, $statusOptionId: String!) {
       updateProjectV2ItemFieldValue(input: {
@@ -287,9 +357,19 @@ def get_issue_comments(issue_id):
                 headers={"Authorization": f"Bearer {config.gh_token}"},
             )
             data = response.json()
-            nodes = data.get("data", {}).get("node", {}).get("comments", {}).get("nodes", [])
+            nodes = (
+                data.get("data", {})
+                .get("node", {})
+                .get("comments", {})
+                .get("nodes", [])
+            )
             comments.extend(nodes)
-            page = data.get("data", {}).get("node", {}).get("comments", {}).get("pageInfo", {})
+            page = (
+                data.get("data", {})
+                .get("node", {})
+                .get("comments", {})
+                .get("pageInfo", {})
+            )
             if not page.get("hasNextPage"):
                 break
             variables["afterCursor"] = page.get("endCursor")
