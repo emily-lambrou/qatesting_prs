@@ -27,7 +27,7 @@ def notify_change_status():
         return
 
     # ----------------------------------------------------------------------------------------
-    # Get the project_id, status_field_id, and QA Testing option ID
+    # Get project details (ID, status field, and QA Testing option)
     # ----------------------------------------------------------------------------------------
 
     project_title = config.project_title
@@ -39,34 +39,23 @@ def notify_change_status():
 
     if not project_id:
         logging.error(f"Project {project_title} not found.")
-        return None
+        return
 
     status_field_id = graphql.get_status_field_id(
         project_id=project_id,
         status_field_name=config.status_field_name
     )
-
     if not status_field_id:
         logging.error(f"Status field not found in project {project_title}")
-        return None
+        return
 
     status_option_id = graphql.get_qatesting_status_option_id(
         project_id=project_id,
         status_field_name=config.status_field_name
     )
-
     if not status_option_id:
         logging.error(f"'QA Testing' option not found in project {project_title}")
-        return None
-
-    # ----------------------------------------------------------------------------------------
-
-    items = graphql.get_project_items(
-        owner=config.repository_owner,
-        owner_type=config.repository_owner_type,
-        project_number=config.project_number,
-        status_field_name=config.status_field_name
-    )
+        return
 
     # ----------------------------------------------------------------------------------------
     # Iterate over merged PRs and update linked issues
@@ -101,33 +90,30 @@ def notify_change_status():
             # Fetch the current status of the issue
             current_status = graphql.get_issue_status(issue_id, config.status_field_name)
 
+            # Always attempt to find the project item dynamically
+            item_id = graphql.get_project_item_id_for_issue(project_id, issue_id)
+
+            if not item_id:
+                logger.warning(f"No project item found for issue #{issue_number}. Skipping.")
+                continue
+
             if current_status != "QA Testing":
                 logger.info(f"Updating issue #{issue_number} to QA Testing (triggered by PR #{pr_number}).")
 
-                item_found = False
-                for item in items:
-                    if item.get("content") and item["content"].get("id") == issue_id:
-                        item_id = item["id"]
-                        item_found = True
+                update_result = graphql.update_issue_status_to_qa_testing(
+                    owner=config.repository_owner,
+                    project_title=project_title,
+                    project_id=project_id,
+                    status_field_id=status_field_id,
+                    item_id=item_id,
+                    status_option_id=status_option_id,
+                )
 
-                        update_result = graphql.update_issue_status_to_qa_testing(
-                            owner=config.repository_owner,
-                            project_title=project_title,
-                            project_id=project_id,
-                            status_field_id=status_field_id,
-                            item_id=item_id,
-                            status_option_id=status_option_id,
-                        )
-
-                        if update_result:
-                            logger.info(f"✅ Successfully updated issue #{issue_number} to QA Testing.")
-                            graphql.add_issue_comment(issue_id, comment_text)
-                        else:
-                            logger.error(f"❌ Failed to update issue #{issue_number}.")
-                        break
-
-                if not item_found:
-                    logger.warning(f"No matching project item found for issue #{issue_number}.")
+                if update_result:
+                    logger.info(f"✅ Successfully updated issue #{issue_number} to QA Testing.")
+                    graphql.add_issue_comment(issue_id, comment_text)
+                else:
+                    logger.error(f"❌ Failed to update issue #{issue_number}.")
             else:
                 # Already QA Testing → just add new comment
                 logger.info(f"Issue #{issue_number} already in QA Testing → adding comment for PR #{pr_number}.")
