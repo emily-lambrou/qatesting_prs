@@ -15,127 +15,127 @@ def check_comment_exists(issue_id, comment_text):
 
 
 def notify_change_status():
-    # Fetch issues based on whether it's an enterprise or not
-    if config.is_enterprise:
-        issues = graphql.get_project_issues(
-            owner=config.repository_owner,
-            owner_type=config.repository_owner_type,
-            project_number=config.project_number,
-            status_field_name=config.status_field_name,
-            filters={"open_only": True},
-        )
-    else:
-        issues = graphql.get_repo_issues(
-            owner=config.repository_owner, repository=config.repository_name
-        )
+    logger.info("Fetching merged PRs into dev...")
 
-    if not issues:
-        logger.info("No issues have been found")
+    merged_prs = graphql.get_recent_merged_prs_in_dev(
+        owner=config.repository_owner,
+        repo=config.repository_name
+    )
+
+    if not merged_prs:
+        logger.info("No merged PRs found in dev.")
         return
 
+    # ----------------------------------------------------------------------------------------
+    # Get the project_id, status_field_id, and QA Testing option ID
+    # ----------------------------------------------------------------------------------------
+
     project_title = config.project_title
+
     project_id = graphql.get_project_id_by_title(
-        owner=config.repository_owner, project_title=project_title
+        owner=config.repository_owner,
+        project_title=project_title
     )
+
     if not project_id:
         logging.error(f"Project {project_title} not found.")
         return None
 
     status_field_id = graphql.get_status_field_id(
-        project_id=project_id, status_field_name=config.status_field_name
+        project_id=project_id,
+        status_field_name=config.status_field_name
     )
+
     if not status_field_id:
         logging.error(f"Status field not found in project {project_title}")
         return None
 
     status_option_id = graphql.get_qatesting_status_option_id(
-        project_id=project_id, status_field_name=config.status_field_name
+        project_id=project_id,
+        status_field_name=config.status_field_name
     )
+
     if not status_option_id:
         logging.error(f"'QA Testing' option not found in project {project_title}")
         return None
+
+    # ----------------------------------------------------------------------------------------
 
     items = graphql.get_project_items(
         owner=config.repository_owner,
         owner_type=config.repository_owner_type,
         project_number=config.project_number,
-        status_field_name=config.status_field_name,
+        status_field_name=config.status_field_name
     )
 
-    for issue in issues:
-        if issue.get("state") == "CLOSED":
+    # ----------------------------------------------------------------------------------------
+    # Iterate over merged PRs and update linked issues
+    # ----------------------------------------------------------------------------------------
+
+    for pr in merged_prs:
+        pr_number = pr["number"]
+        pr_url = pr["url"]
+        pr_title = pr["title"]
+        linked_issues = pr.get("closingIssuesReferences", {}).get("nodes", [])
+
+        if not linked_issues:
+            logger.info(f"PR #{pr_number} ({pr_title}) has no linked issues.")
             continue
 
-        issue_content = issue.get("content", {})
-        if not issue_content:
-            continue
+        logger.info(f"Processing PR #{pr_number} with {len(linked_issues)} linked issue(s).")
 
-        issue_id = issue_content.get("id")
-        if not issue_id:
-            continue
+        for issue in linked_issues:
+            issue_id = issue["id"]
+            issue_number = issue["number"]
 
-        field_value = issue.get("fieldValueByName")
-        current_status = field_value.get("name") if field_value else None
-
-        latest_pr = graphql.get_latest_merged_pr_into_dev(issue_id)
-        if not latest_pr:
-            continue
-
-        pr_number = latest_pr["number"]
-        pr_url = latest_pr["url"]
-
-        comment_text = (
-            f"Testing will be available in 15 minutes "
-            f"(triggered by [PR #{pr_number}]({pr_url}))"
-        )
-
-        # Skip if comment for this PR already exists
-        if check_comment_exists(issue_id, comment_text):
-            continue
-
-        if current_status != "QA Testing":
-            # Update status to QA Testing
-            logger.info(
-                f"Updating issue {issue_id} to QA Testing (triggered by PR #{pr_number})"
+            comment_text = (
+                f"Testing will be available in 15 minutes "
+                f"(triggered by [PR #{pr_number}]({pr_url}))"
             )
 
-            item_found = False
-            for item in items:
-                if item.get("content") and item["content"].get("id") == issue_id:
-                    item_id = item["id"]
-                    item_found = True
-
-                    update_result = graphql.update_issue_status_to_qa_testing(
-                        owner=config.repository_owner,
-                        project_title=project_title,
-                        project_id=project_id,
-                        status_field_id=status_field_id,
-                        item_id=item_id,
-                        status_option_id=status_option_id,
-                    )
-
-                    if update_result:
-                        logger.info(
-                            f"Successfully updated issue {issue_id} to QA Testing."
-                        )
-                        graphql.add_issue_comment(issue_id, comment_text)
-                    else:
-                        logger.error(f"Failed to update issue {issue_id}.")
-                    break
-
-            if not item_found:
-                logger.warning(f"No matching item found for issue ID: {issue_id}.")
+            # Skip if comment already exists
+            if check_comment_exists(issue_id, comment_text):
+                logger.info(f"Skipping issue #{issue_number} — comment already exists for PR #{pr_number}.")
                 continue
-        else:
-            # Already QA → just drop a new comment for the new PR
-            logger.info(
-                f"Issue {issue_id} already QA Testing → adding new comment for PR #{pr_number}"
-            )
-            graphql.add_issue_comment(issue_id, comment_text)
+
+            # Fetch the current status of the issue
+            current_status = graphql.get_issue_status(issue_id, config.status_field_name)
+
+            if current_status != "QA Testing":
+                logger.info(f"Updating issue #{issue_number} to QA Testing (triggered by PR #{pr_number}).")
+
+                item_found = False
+                for item in items:
+                    if item.get("content") and item["content"].get("id") == issue_id:
+                        item_id = item["id"]
+                        item_found = True
+
+                        update_result = graphql.update_issue_status_to_qa_testing(
+                            owner=config.repository_owner,
+                            project_title=project_title,
+                            project_id=project_id,
+                            status_field_id=status_field_id,
+                            item_id=item_id,
+                            status_option_id=status_option_id,
+                        )
+
+                        if update_result:
+                            logger.info(f"✅ Successfully updated issue #{issue_number} to QA Testing.")
+                            graphql.add_issue_comment(issue_id, comment_text)
+                        else:
+                            logger.error(f"❌ Failed to update issue #{issue_number}.")
+                        break
+
+                if not item_found:
+                    logger.warning(f"No matching project item found for issue #{issue_number}.")
+            else:
+                # Already QA Testing → just add new comment
+                logger.info(f"Issue #{issue_number} already in QA Testing → adding comment for PR #{pr_number}.")
+                graphql.add_issue_comment(issue_id, comment_text)
 
 
 def main():
-    logger.info("Process started...")
+    logger.info("🔄 Process started...")
     if config.dry_run:
         logger.info("DRY RUN MODE ON!")
 
