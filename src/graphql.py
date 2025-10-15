@@ -9,6 +9,7 @@ logging.basicConfig(level=logging.DEBUG)
 def get_recent_merged_prs_in_dev(owner, repo, since_timestamp=None):
     """
     Fetch all merged PRs in the 'dev' branch (optionally after a given date).
+    Uses 'referencedIssues' to capture all issues mentioned with '#' in the PR body.
     """
     query = """
     query GetMergedPRs($owner: String!, $repo: String!, $afterCursor: String) {
@@ -26,7 +27,7 @@ def get_recent_merged_prs_in_dev(owner, repo, since_timestamp=None):
             title
             mergedAt
             url
-            closingIssuesReferences(first: 10) {
+            referencedIssues(first: 10) {
               nodes {
                 id
                 number
