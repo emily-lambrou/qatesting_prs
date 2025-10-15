@@ -1,19 +1,20 @@
 import logging
 import requests
+import re
 import config
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
-def get_recent_merged_prs_in_dev(owner, repo, since_timestamp=None):
-    """
-    Fetch all merged PRs in 'dev' branch with body text for parsing references.
-    """
+# ----------------------------------------------------------------------------------------
+# Fetch merged PRs into dev
+# ----------------------------------------------------------------------------------------
+def get_recent_merged_prs_in_dev(owner, repo):
     query = """
     query GetMergedPRs($owner: String!, $repo: String!, $afterCursor: String) {
       repository(owner: $owner, name: $repo) {
         pullRequests(
-          first: 100
+          first: 50
           after: $afterCursor
           baseRefName: "dev"
           states: MERGED
@@ -37,7 +38,6 @@ def get_recent_merged_prs_in_dev(owner, repo, since_timestamp=None):
     """
     variables = {"owner": owner, "repo": repo, "afterCursor": None}
     prs = []
-
     try:
         while True:
             response = requests.post(
@@ -46,18 +46,15 @@ def get_recent_merged_prs_in_dev(owner, repo, since_timestamp=None):
                 headers={"Authorization": f"Bearer {config.gh_token}"},
             )
             data = response.json()
-
             if "errors" in data:
                 logging.error(f"GraphQL query errors: {data['errors']}")
                 break
 
             nodes = data.get("data", {}).get("repository", {}).get("pullRequests", {}).get("nodes", [])
             prs.extend(nodes)
-
-            page_info = data.get("data", {}).get("repository", {}).get("pullRequests", {}).get("pageInfo", {})
-            if not page_info.get("hasNextPage"):
+            if not data["data"]["repository"]["pullRequests"]["pageInfo"]["hasNextPage"]:
                 break
-            variables["afterCursor"] = page_info.get("endCursor")
+            variables["afterCursor"] = data["data"]["repository"]["pullRequests"]["pageInfo"]["endCursor"]
 
         return prs
     except requests.RequestException as e:
@@ -65,6 +62,54 @@ def get_recent_merged_prs_in_dev(owner, repo, since_timestamp=None):
         return []
 
 
+# ----------------------------------------------------------------------------------------
+# Extract referenced issues (#123 or repo#456) from PR description
+# ----------------------------------------------------------------------------------------
+def extract_referenced_issues_from_text(text):
+    """Extracts issue references like #123 or repo#456 or org/repo#789."""
+    pattern = r"(?:[\w\-]+\/[\w\-]+#\d+|[\w\-]+#\d+|#\d+)"
+    return re.findall(pattern, text)
+
+
+# ----------------------------------------------------------------------------------------
+# Resolve issue reference (handles cross-repo issues too)
+# ----------------------------------------------------------------------------------------
+def resolve_issue_reference(reference):
+    """Return issue ID, number, and URL for a given reference."""
+    match = re.match(r"(?:(?P<org>[\w\-]+)/(?P<repo>[\w\-]+))?#(?P<number>\d+)", reference)
+    if not match:
+        return None
+
+    org = match.group("org") or config.repository_owner
+    repo = match.group("repo") or config.repository_name
+    number = int(match.group("number"))
+
+    query = """
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          id
+          number
+          title
+          url
+        }
+      }
+    }
+    """
+    variables = {"owner": org, "repo": repo, "number": number}
+    response = requests.post(
+        config.api_endpoint,
+        json={"query": query, "variables": variables},
+        headers={"Authorization": f"Bearer {config.gh_token}"},
+    )
+    data = response.json()
+    issue = data.get("data", {}).get("repository", {}).get("issue")
+    return issue
+
+
+# ----------------------------------------------------------------------------------------
+# Project and Status Handling
+# ----------------------------------------------------------------------------------------
 def get_project_id_by_title(owner, project_title):
     query = """
     query($owner: String!, $projectTitle: String!) {
@@ -75,9 +120,10 @@ def get_project_id_by_title(owner, project_title):
       }
     }
     """
+    variables = {"owner": owner, "projectTitle": project_title}
     response = requests.post(
         config.api_endpoint,
-        json={"query": query, "variables": {"owner": owner, "projectTitle": project_title}},
+        json={"query": query, "variables": variables},
         headers={"Authorization": f"Bearer {config.gh_token}"},
     )
     data = response.json()
@@ -114,8 +160,9 @@ def get_status_field_id(project_id, status_field_name):
     data = response.json()
     fields = data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
     for field in fields:
-        if field["name"] == status_field_name:
+        if field.get("__typename") == "ProjectV2SingleSelectField" and field.get("name") == status_field_name:
             return field["id"]
+    logging.error(f"Status field '{status_field_name}' not found among project fields.")
     return None
 
 
@@ -126,6 +173,7 @@ def get_qatesting_status_option_id(project_id, status_field_name):
         ... on ProjectV2 {
           fields(first: 100) {
             nodes {
+              __typename
               ... on ProjectV2SingleSelectField {
                 id
                 name
@@ -148,32 +196,17 @@ def get_qatesting_status_option_id(project_id, status_field_name):
     data = response.json()
     fields = data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
     for field in fields:
-        if field.get("name") == status_field_name:
+        if field.get("__typename") == "ProjectV2SingleSelectField" and field.get("name") == status_field_name:
             for option in field.get("options", []):
-                if option["name"] == "QA Testing":
+                if option.get("name") == "QA Testing":
                     return option["id"]
+    logging.error(f"'QA Testing' option not found under field '{status_field_name}'.")
     return None
 
 
-def get_issue_id_by_number(owner, repo, issue_number):
-    query = """
-    query($owner: String!, $repo: String!, $number: Int!) {
-      repository(owner: $owner, name: $repo) {
-        issue(number: $number) {
-          id
-        }
-      }
-    }
-    """
-    response = requests.post(
-        config.api_endpoint,
-        json={"query": query, "variables": {"owner": owner, "repo": repo, "number": issue_number}},
-        headers={"Authorization": f"Bearer {config.gh_token}"},
-    )
-    data = response.json()
-    return data.get("data", {}).get("repository", {}).get("issue", {}).get("id")
-
-
+# ----------------------------------------------------------------------------------------
+# Issue utilities
+# ----------------------------------------------------------------------------------------
 def get_issue_status(issue_id, status_field_name):
     query = """
     query($issueId: ID!, $statusField: String!) {
@@ -192,9 +225,10 @@ def get_issue_status(issue_id, status_field_name):
       }
     }
     """
+    variables = {"issueId": issue_id, "statusField": status_field_name}
     response = requests.post(
         config.api_endpoint,
-        json={"query": query, "variables": {"issueId": issue_id, "statusField": status_field_name}},
+        json={"query": query, "variables": variables},
         headers={"Authorization": f"Bearer {config.gh_token}"},
     )
     data = response.json()
@@ -209,12 +243,12 @@ def get_issue_status(issue_id, status_field_name):
         return None
 
 
-def update_issue_status_to_qa_testing(owner, project_title, project_id, status_field_id, item_id, status_option_id, issue_id):
+def update_issue_status_to_qa_testing(owner, project_title, project_id, status_field_id, item_id, status_option_id):
     mutation = """
-    mutation UpdateIssueStatus($projectId: ID!, $issueId: ID!, $statusFieldId: ID!, $statusOptionId: String!) {
+    mutation UpdateIssueStatus($projectId: ID!, $itemId: ID!, $statusFieldId: ID!, $statusOptionId: String!) {
       updateProjectV2ItemFieldValue(input: {
         projectId: $projectId,
-        itemId: $issueId,
+        itemId: $itemId,
         fieldId: $statusFieldId,
         value: { singleSelectOptionId: $statusOptionId }
       }) {
@@ -222,17 +256,15 @@ def update_issue_status_to_qa_testing(owner, project_title, project_id, status_f
       }
     }
     """
+    variables = {
+        "projectId": project_id,
+        "itemId": item_id,
+        "statusFieldId": status_field_id,
+        "statusOptionId": status_option_id,
+    }
     response = requests.post(
         config.api_endpoint,
-        json={
-            "query": mutation,
-            "variables": {
-                "projectId": project_id,
-                "issueId": issue_id,
-                "statusFieldId": status_field_id,
-                "statusOptionId": status_option_id,
-            },
-        },
+        json={"query": mutation, "variables": variables},
         headers={"Authorization": f"Bearer {config.gh_token}"},
     )
     return response.json().get("data")
@@ -285,9 +317,10 @@ def add_issue_comment(issue_id, body: str):
       }
     }
     """
+    variables = {"subjectId": issue_id, "body": body}
     response = requests.post(
         config.api_endpoint,
-        json={"query": mutation, "variables": {"subjectId": issue_id, "body": body}},
+        json={"query": mutation, "variables": variables},
         headers={"Authorization": f"Bearer {config.gh_token}"},
     )
     return response.json().get("data")
