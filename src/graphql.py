@@ -94,10 +94,10 @@ def get_project_id_by_title(owner, project_title):
             headers={"Authorization": f"Bearer {config.gh_token}"},
         )
         data = response.json()
-        projects = data["data"]["organization"]["projectsV2"]["nodes"]
+        projects = data.get("data", {}).get("organization", {}).get("projectsV2", {}).get("nodes", [])
         for project in projects:
-            if project["title"] == project_title:
-                return project["id"]
+            if project.get("title") == project_title:
+                return project.get("id")
         return None
     except requests.RequestException as e:
         logging.error(f"Request error: {e}")
@@ -105,6 +105,10 @@ def get_project_id_by_title(owner, project_title):
 
 
 def get_status_field_id(project_id, status_field_name):
+    """
+    Returns the ID of the 'Status' field in the specified project.
+    Now handles cases where nodes lack a 'name' key safely.
+    """
     query = """
     query($projectId: ID!) {
       node(id: $projectId) {
@@ -123,26 +127,35 @@ def get_status_field_id(project_id, status_field_name):
     }
     """
     variables = {"projectId": project_id}
-    response = requests.post(
-        config.api_endpoint,
-        json={"query": query, "variables": variables},
-        headers={"Authorization": f"Bearer {config.gh_token}"},
-    )
-    data = response.json()
-    fields = data["data"]["node"]["fields"]["nodes"]
-    for field in fields:
-        if field["name"] == status_field_name:
-            return field["id"]
-    return None
+    try:
+        response = requests.post(
+            config.api_endpoint,
+            json={"query": query, "variables": variables},
+            headers={"Authorization": f"Bearer {config.gh_token}"},
+        )
+        data = response.json()
+        fields = data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
+        for field in fields:
+            if field.get("__typename") == "ProjectV2SingleSelectField" and field.get("name") == status_field_name:
+                return field.get("id")
+        return None
+    except requests.RequestException as e:
+        logging.error(f"Request error: {e}")
+        return None
 
 
 def get_qatesting_status_option_id(project_id, status_field_name):
+    """
+    Returns the option ID for 'QA Testing' within the project's Status field.
+    Includes safe access and null checks.
+    """
     query = """
     query($projectId: ID!) {
       node(id: $projectId) {
         ... on ProjectV2 {
           fields(first: 100) {
             nodes {
+              __typename
               ... on ProjectV2SingleSelectField {
                 id
                 name
@@ -158,19 +171,23 @@ def get_qatesting_status_option_id(project_id, status_field_name):
     }
     """
     variables = {"projectId": project_id}
-    response = requests.post(
-        config.api_endpoint,
-        json={"query": query, "variables": variables},
-        headers={"Authorization": f"Bearer {config.gh_token}"},
-    )
-    data = response.json()
-    fields = data["data"]["node"]["fields"]["nodes"]
-    for field in fields:
-        if field.get("name") == status_field_name:
-            for option in field.get("options", []):
-                if option["name"] == "QA Testing":
-                    return option["id"]
-    return None
+    try:
+        response = requests.post(
+            config.api_endpoint,
+            json={"query": query, "variables": variables},
+            headers={"Authorization": f"Bearer {config.gh_token}"},
+        )
+        data = response.json()
+        fields = data.get("data", {}).get("node", {}).get("fields", {}).get("nodes", [])
+        for field in fields:
+            if field.get("__typename") == "ProjectV2SingleSelectField" and field.get("name") == status_field_name:
+                for option in field.get("options", []):
+                    if option.get("name") == "QA Testing":
+                        return option.get("id")
+        return None
+    except requests.RequestException as e:
+        logging.error(f"Request error: {e}")
+        return None
 
 
 def get_issue_status(issue_id, status_field_name):
@@ -192,20 +209,21 @@ def get_issue_status(issue_id, status_field_name):
     }
     """
     variables = {"issueId": issue_id, "statusField": status_field_name}
-    response = requests.post(
-        config.api_endpoint,
-        json={"query": query, "variables": variables},
-        headers={"Authorization": f"Bearer {config.gh_token}"},
-    )
-    data = response.json()
     try:
-        nodes = data["data"]["node"]["projectItems"]["nodes"]
+        response = requests.post(
+            config.api_endpoint,
+            json={"query": query, "variables": variables},
+            headers={"Authorization": f"Bearer {config.gh_token}"},
+        )
+        data = response.json()
+        nodes = data.get("data", {}).get("node", {}).get("projectItems", {}).get("nodes", [])
         for item in nodes:
             field = item.get("fieldValueByName")
             if field:
                 return field.get("name")
         return None
-    except Exception:
+    except requests.RequestException as e:
+        logging.error(f"Request error: {e}")
         return None
 
 
@@ -228,12 +246,16 @@ def update_issue_status_to_qa_testing(owner, project_title, project_id, status_f
         "statusFieldId": status_field_id,
         "statusOptionId": status_option_id,
     }
-    response = requests.post(
-        config.api_endpoint,
-        json={"query": mutation, "variables": variables},
-        headers={"Authorization": f"Bearer {config.gh_token}"},
-    )
-    return response.json().get("data")
+    try:
+        response = requests.post(
+            config.api_endpoint,
+            json={"query": mutation, "variables": variables},
+            headers={"Authorization": f"Bearer {config.gh_token}"},
+        )
+        return response.json().get("data")
+    except requests.RequestException as e:
+        logging.error(f"Request error: {e}")
+        return None
 
 
 def get_issue_comments(issue_id):
@@ -257,20 +279,24 @@ def get_issue_comments(issue_id):
     """
     variables = {"issueId": issue_id, "afterCursor": None}
     comments = []
-    while True:
-        response = requests.post(
-            config.api_endpoint,
-            json={"query": query, "variables": variables},
-            headers={"Authorization": f"Bearer {config.gh_token}"},
-        )
-        data = response.json()
-        nodes = data.get("data", {}).get("node", {}).get("comments", {}).get("nodes", [])
-        comments.extend(nodes)
-        page = data.get("data", {}).get("node", {}).get("comments", {}).get("pageInfo", {})
-        if not page.get("hasNextPage"):
-            break
-        variables["afterCursor"] = page.get("endCursor")
-    return comments
+    try:
+        while True:
+            response = requests.post(
+                config.api_endpoint,
+                json={"query": query, "variables": variables},
+                headers={"Authorization": f"Bearer {config.gh_token}"},
+            )
+            data = response.json()
+            nodes = data.get("data", {}).get("node", {}).get("comments", {}).get("nodes", [])
+            comments.extend(nodes)
+            page = data.get("data", {}).get("node", {}).get("comments", {}).get("pageInfo", {})
+            if not page.get("hasNextPage"):
+                break
+            variables["afterCursor"] = page.get("endCursor")
+        return comments
+    except requests.RequestException as e:
+        logging.error(f"Request error: {e}")
+        return []
 
 
 def add_issue_comment(issue_id, body: str):
@@ -284,9 +310,13 @@ def add_issue_comment(issue_id, body: str):
     }
     """
     variables = {"subjectId": issue_id, "body": body}
-    response = requests.post(
-        config.api_endpoint,
-        json={"query": mutation, "variables": variables},
-        headers={"Authorization": f"Bearer {config.gh_token}"},
-    )
-    return response.json().get("data")
+    try:
+        response = requests.post(
+            config.api_endpoint,
+            json={"query": mutation, "variables": variables},
+            headers={"Authorization": f"Bearer {config.gh_token}"},
+        )
+        return response.json().get("data")
+    except requests.RequestException as e:
+        logging.error(f"Request error: {e}")
+        return None
