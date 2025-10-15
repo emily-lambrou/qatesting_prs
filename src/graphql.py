@@ -63,7 +63,7 @@ def get_recent_merged_prs_in_dev(owner, repo):
 
 
 # ----------------------------------------------------------------------------------------
-# Extract referenced issues (#123 or repo#456) from PR description
+# Extract referenced issues (#123 or repo#456 or org/repo#789) from PR description
 # ----------------------------------------------------------------------------------------
 def extract_referenced_issues_from_text(text):
     """Extracts issue references like #123 or repo#456 or org/repo#789."""
@@ -202,6 +202,81 @@ def get_qatesting_status_option_id(project_id, status_field_name):
                     return option["id"]
     logging.error(f"'QA Testing' option not found under field '{status_field_name}'.")
     return None
+
+
+# ----------------------------------------------------------------------------------------
+# Fetch Project Items 
+# ----------------------------------------------------------------------------------------
+def get_project_items(owner, owner_type, project_number, status_field_name):
+    """
+    Fetch all items from the project board to map issues to their ProjectV2 item IDs.
+    """
+    query = """
+    query($owner: String!, $projectNumber: Int!, $afterCursor: String) {
+      organization(login: $owner) {
+        projectV2(number: $projectNumber) {
+          items(first: 100, after: $afterCursor) {
+            nodes {
+              id
+              content {
+                ... on Issue {
+                  id
+                  number
+                  title
+                  url
+                }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      }
+    }
+    """
+    variables = {"owner": owner, "projectNumber": project_number, "afterCursor": None}
+    items = []
+
+    try:
+        while True:
+            response = requests.post(
+                config.api_endpoint,
+                json={"query": query, "variables": variables},
+                headers={"Authorization": f"Bearer {config.gh_token}"},
+            )
+            data = response.json()
+
+            if "errors" in data:
+                logging.error(f"GraphQL query errors: {data['errors']}")
+                break
+
+            nodes = (
+                data.get("data", {})
+                .get("organization", {})
+                .get("projectV2", {})
+                .get("items", {})
+                .get("nodes", [])
+            )
+            items.extend(nodes)
+
+            page_info = (
+                data.get("data", {})
+                .get("organization", {})
+                .get("projectV2", {})
+                .get("items", {})
+                .get("pageInfo", {})
+            )
+
+            if not page_info.get("hasNextPage"):
+                break
+            variables["afterCursor"] = page_info.get("endCursor")
+
+        return items
+    except requests.RequestException as e:
+        logging.error(f"Request error while fetching project items: {e}")
+        return []
 
 
 # ----------------------------------------------------------------------------------------
