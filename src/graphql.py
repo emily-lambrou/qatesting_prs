@@ -106,7 +106,6 @@ def resolve_issue_reference(reference):
     issue = data.get("data", {}).get("repository", {}).get("issue")
     return issue
 
-
 # ----------------------------------------------------------------------------------------
 # Project and Status Handling
 # ----------------------------------------------------------------------------------------
